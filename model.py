@@ -87,6 +87,13 @@ def build_features_for_date(d: date, weather: dict = None) -> dict:
                                   15 <= float(weather.get("temperature_2m_max", 15) or 15) <= 26 and
                                   float(weather.get("precipitation_sum", 0) or 0) < 1.0
                               ),
+
+        # ── Parking bias correction ───────────────────────────────────────
+        # Ballarat has free parking on Sundays and public holidays, meaning
+        # parking transaction counts drop to zero on these days — not because
+        # the town is quiet, but because the meters aren't running.
+        # This flag tells the model to discount the missing parking signal.
+        "is_free_parking_day": int(d.weekday() == 6 or is_ph),
     }
     return feats
 
@@ -120,6 +127,7 @@ FEATURE_COLS = [
     "temp_max", "temp_min", "precipitation", "wind_max",
     "weather_code", "sunshine_hours",
     "is_rainy", "is_hot", "is_cold", "is_pleasant",
+    "is_free_parking_day",
 ]
 
 
@@ -141,10 +149,17 @@ def generate_synthetic_traffic(years: int = 3) -> pd.DataFrame:
     d = start
     while d < today:
         base = 50.0
-        # Weekday patterns
+        # Weekday patterns — based on real foot traffic not parking transactions
+        # Sunday is genuinely moderately busy (free parking day, families out)
         dow = d.weekday()
-        day_boost = [0, 5, 5, 8, 15, 30, 20][dow]  # Fri/Sat busiest
+        day_boost = [0, 5, 5, 8, 15, 30, 18][dow]  # Mon–Sun
         base += day_boost
+
+        # Free parking day (Sunday or public holiday) — parking data is zero
+        # but actual busyness is NOT zero; add a correction boost
+        is_ph, _ = is_public_holiday(d)
+        if dow == 6 or is_ph:
+            base += 10  # correct for missing parking signal
 
         # Monthly seasonality (Ballarat)
         monthly = {1: -5, 2: -3, 3: 10, 4: 5, 5: 0, 6: -8,
@@ -156,7 +171,6 @@ def generate_synthetic_traffic(years: int = 3) -> pd.DataFrame:
         base += event_impact * 12
 
         # Public holidays
-        is_ph, _ = is_public_holiday(d)
         if is_ph:
             base += 20
 
@@ -309,7 +323,8 @@ def build_reason_summary(d: date, feats: dict, weather: dict, score: float) -> l
     if d.weekday() == 5:
         reasons.append(("📅", "Saturday", "Saturdays are consistently the busiest day in Ballarat's CBD."))
     elif d.weekday() == 6:
-        reasons.append(("📅", "Sunday", "Sundays bring moderate foot traffic — many shops open shorter hours."))
+        reasons.append(("📅", "Sunday", "Sundays bring moderate foot traffic — free parking encourages family visits and leisure shopping."))
+        reasons.append(("🅿️", "Free Parking Day", "Parking is free on Sundays in Ballarat, so parking transaction data is not available. The model accounts for this and does not treat the missing data as a sign of low activity."))
     elif d.weekday() == 4:
         reasons.append(("📅", "Friday", "Fridays are the second-busiest weekday, with after-work and evening activity."))
     else:
@@ -319,6 +334,7 @@ def build_reason_summary(d: date, feats: dict, weather: dict, score: float) -> l
     is_ph, ph_name = is_public_holiday(d)
     if is_ph:
         reasons.append(("🎉", f"Public Holiday: {ph_name}", "Public holidays significantly boost CBD activity — markets, events and day-trippers."))
+        reasons.append(("🅿️", "Free Parking Day", "Parking is free on public holidays in Ballarat. The model accounts for the missing parking data and does not treat it as low activity."))
     elif is_eve_of_holiday(d):
         reasons.append(("🌙", "Eve of Public Holiday", "The day before a public holiday often sees elevated shopping and hospitality activity."))
 
