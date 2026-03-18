@@ -15,6 +15,7 @@ import plotly.express as px
 from datetime import date, timedelta
 import sys
 import os
+from data_fetcher import describe_weather_code
 
 # ── Page config (must be first Streamlit call) ────────────────────────────
 st.set_page_config(
@@ -124,7 +125,7 @@ div[data-testid="stSelectbox"] > div {
 .sidebar-header {
     font-family: 'Playfair Display', serif;
     font-size: 1.3rem;
-    color: #1a1a2e;
+    color: #ffffff;
     margin-bottom: 0.5rem;
 }
 
@@ -298,8 +299,8 @@ with col_score:
         temp_max = weather.get("temperature_2m_max")
         precip   = weather.get("precipitation_sum")
         code     = weather.get("weathercode")
-        _, wx_emoji, _ = __import__("data_fetcher").describe_weather_code(code)
-        wx_desc, _, _  = __import__("data_fetcher").describe_weather_code(code)
+        _, wx_emoji, _ = describe_weather_code(code)
+        wx_desc, _, _  = describe_weather_code(code)
 
         m1, m2 = st.columns(2)
         with m1:
