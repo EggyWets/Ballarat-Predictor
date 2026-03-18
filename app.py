@@ -41,14 +41,14 @@ h1, h2, h3 {
     font-family: 'Playfair Display', Georgia, serif;
     font-size: 2.6rem;
     font-weight: 700;
-    color: #1a1a2e;
+    color: #ffffff;
     margin-bottom: 0;
 }
 
 .sub-title {
     font-family: 'Source Sans 3', sans-serif;
     font-size: 1.0rem;
-    color: #5c6b7a;
+    color: #c0ccd8;
     margin-top: 0.2rem;
     margin-bottom: 1.5rem;
 }
@@ -509,6 +509,7 @@ st.markdown("""
     Ballarat Busyness Forecaster &nbsp;|&nbsp;
     Data: <a href="https://data.ballarat.vic.gov.au" style="color:#3a86ff">Ballarat Open Data</a>,
     <a href="https://open-meteo.com" style="color:#3a86ff">Open-Meteo</a> &nbsp;|&nbsp;
-    Built with Streamlit + XGBoost
+    Built with Streamlit + XGBoost &nbsp;|&nbsp;
+    Made by <strong style="color:#ffffff">Justin Molik</strong>
 </div>
 """, unsafe_allow_html=True)
