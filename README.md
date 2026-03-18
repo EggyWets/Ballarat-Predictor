@@ -102,3 +102,4 @@ Open `data_fetcher.py` and find the `LOCAL_EVENTS` list near the top. Each event
 **Model trains on synthetic data every time** — The Ballarat Open Data API may be temporarily unavailable. Check `https://data.ballarat.vic.gov.au` in your browser.
 
 **Slow first load** — The model fetches several years of weather data on first run. Subsequent loads use Streamlit's cache.
+# Ballarat-Predictor
