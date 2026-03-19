@@ -348,7 +348,7 @@ def score_to_label(score):
     if score >= 25: return {"text":"Quiet",       "colour":"#2ecc71","emoji":"🟢","tier":2}
     return             {"text":"Very Quiet",   "colour":"#27ae60","emoji":"🟢","tier":1}
 
-def build_reasons(d, feats, weather, score):
+def build_reasons(d, feats, weather, score, data_stats=None):
     reasons   = []
     dow_names = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
     dow       = dow_names[d.weekday()]
@@ -403,6 +403,58 @@ def build_reasons(d, feats, weather, score):
         if feats.get(key):
             reasons.append((icon, label, detail))
             break
+
+    # ── Historical data observations ──────────────────────────────────────
+    if data_stats and data_stats.get("source") == "live":
+        dow_names = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+        dow       = d.weekday()
+        avg_by_dow = data_stats.get("avg_by_dow", {})
+        overall    = data_stats.get("avg_overall", 50)
+        total_days = data_stats.get("total_days", 0)
+        start_str  = data_stats.get("date_range_start", "")
+        end_str    = data_stats.get("date_range_end", "")
+        busiest    = data_stats.get("busiest_dow", 5)
+        quietest   = data_stats.get("quietest_dow", 1)
+        pct_busy   = data_stats.get("pct_above_65", 0)
+
+        # Day-of-week historical average
+        if dow in avg_by_dow:
+            dow_avg = avg_by_dow[dow]
+            vs_overall = dow_avg - overall
+            direction  = f"{abs(vs_overall):.0f} points above" if vs_overall > 0 else f"{abs(vs_overall):.0f} points below"
+            reasons.append((
+                "📊", f"Historical Pattern: {dow_names[dow]}s",
+                f"Based on {total_days:,} days of real Ballarat sensor data "
+                f"({start_str[:7]} to {end_str[:7]}), {dow_names[dow]}s average a busyness score of "
+                f"{dow_avg:.0f}/100 — {direction} the overall daily average of {overall:.0f}. "
+                f"The busiest day historically is {dow_names[busiest]}, "
+                f"the quietest is {dow_names[quietest]}."
+            ))
+
+        # Infrared / pedestrian sensor note
+        reasons.append((
+            "🚶", "Pedestrian Sensor Data",
+            f"This forecast draws on live infrared pedestrian counter data from Ballarat City Council sensors "
+            f"located at Lake Wendouree, Loreto Point and key CBD locations. Across all training data, "
+            f"{pct_busy:.0f}% of days exceeded the 'Busy' threshold (score ≥ 65)."
+        ))
+
+        # Parking data note
+        is_ph, _ = is_public_holiday(d)
+        if d.weekday() == 6 or is_ph:
+            reasons.append((
+                "🅿️", "Parking Data: Not Used Today",
+                "Ballarat City Council parking transaction data is excluded for Sundays and public holidays "
+                "as meters are not active. The forecast relies solely on pedestrian counter data and "
+                "calendar/weather signals for these days."
+            ))
+        else:
+            reasons.append((
+                "🅿️", "Parking Transaction Data",
+                "CBD parking transaction volumes from Ballarat City Council meters contribute to this forecast. "
+                "Higher parking activity on weekdays strongly correlates with overall CBD busyness."
+            ))
+
     return reasons
 
 class BusynessModel:
@@ -412,6 +464,7 @@ class BusynessModel:
         self.feature_importances = {}
         self.train_r2 = None
         self.data_source = "unknown"
+        self.data_stats = {}   # stores observed averages for reason callouts
 
     def train(self, use_live_data=True):
         from xgboost import XGBRegressor
@@ -456,6 +509,20 @@ class BusynessModel:
         cv = cross_val_score(self.model, X, y, cv=min(5, len(X)//20 or 2), scoring="r2")
         self.train_r2 = float(np.mean(cv))
         self.feature_importances = dict(sorted(zip(FEATURE_COLS, self.model.feature_importances_), key=lambda x: -x[1]))
+
+        # Cache observed data stats for use in reason summaries
+        df["dow"] = df["date"].apply(lambda d: d.weekday() if hasattr(d, "weekday") else 0)
+        self.data_stats = {
+            "total_days":        len(df),
+            "date_range_start":  str(min_date),
+            "date_range_end":    str(max_date),
+            "avg_by_dow":        df.groupby("dow")["busyness_index"].mean().to_dict(),
+            "avg_overall":       float(df["busyness_index"].mean()),
+            "busiest_dow":       int(df.groupby("dow")["busyness_index"].mean().idxmax()),
+            "quietest_dow":      int(df.groupby("dow")["busyness_index"].mean().idxmin()),
+            "pct_above_65":      float((df["busyness_index"] >= 65).mean() * 100),
+            "source":            self.data_source,
+        }
         self.is_trained = True
 
     def predict(self, d, weather=None):
@@ -471,7 +538,7 @@ class BusynessModel:
             "label": score_to_label(score),
             "feats": feats, "weather": weather,
             "events": get_events_for_date(d),
-            "reasons": build_reasons(d, feats, weather, score),
+            "reasons": build_reasons(d, feats, weather, score, self.data_stats),
         }
 
 
