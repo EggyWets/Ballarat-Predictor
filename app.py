@@ -470,7 +470,18 @@ class BusynessModel:
         from xgboost import XGBRegressor
         from sklearn.model_selection import cross_val_score
 
-        traffic = combine_traffic_data() if use_live_data else pd.DataFrame()
+        # Fetch each source individually so we can report diagnostics
+        if use_live_data:
+            infrared_raw = fetch_infrared_counters()
+            people_raw   = fetch_people_counts()
+            parking_raw  = fetch_parking_transactions()
+            traffic      = combine_traffic_data()
+        else:
+            infrared_raw = pd.DataFrame()
+            people_raw   = pd.DataFrame()
+            parking_raw  = pd.DataFrame()
+            traffic      = pd.DataFrame()
+
         if len(traffic) < 30:
             traffic = generate_synthetic_traffic(years=3)
             self.data_source = "synthetic"
@@ -510,18 +521,59 @@ class BusynessModel:
         self.train_r2 = float(np.mean(cv))
         self.feature_importances = dict(sorted(zip(FEATURE_COLS, self.model.feature_importances_), key=lambda x: -x[1]))
 
-        # Cache observed data stats for use in reason summaries
+        # ── Per-source day counts for diagnostics ─────────────────────────
+        def _date_range(df_src):
+            if df_src.empty or "date" not in df_src.columns:
+                return "N/A", "N/A"
+            dates = pd.to_datetime(df_src["date"].astype(str))
+            return str(dates.min().date()), str(dates.max().date())
+
+        infrared_start, infrared_end = _date_range(infrared_raw)
+        people_start,   people_end   = _date_range(people_raw)
+        parking_start,  parking_end  = _date_range(parking_raw)
+        weather_start,  weather_end  = _date_range(weather_df)
+
+        # Parking after free-parking-day filter
+        if not parking_raw.empty:
+            cache = {}
+            def _is_free(d):
+                if isinstance(d, str): d = date.fromisoformat(d)
+                if d.weekday() == 6: return True
+                if d.year not in cache: cache[d.year] = get_vic_holidays(d.year)
+                return d in cache[d.year]
+            parking_filtered = parking_raw[~parking_raw["date"].apply(_is_free)]
+        else:
+            parking_filtered = pd.DataFrame()
+
+        # Cache observed data stats for use in reason summaries and diagnostics
         df["dow"] = df["date"].apply(lambda d: d.weekday() if hasattr(d, "weekday") else 0)
         self.data_stats = {
-            "total_days":        len(df),
-            "date_range_start":  str(min_date),
-            "date_range_end":    str(max_date),
-            "avg_by_dow":        df.groupby("dow")["busyness_index"].mean().to_dict(),
-            "avg_overall":       float(df["busyness_index"].mean()),
-            "busiest_dow":       int(df.groupby("dow")["busyness_index"].mean().idxmax()),
-            "quietest_dow":      int(df.groupby("dow")["busyness_index"].mean().idxmin()),
-            "pct_above_65":      float((df["busyness_index"] >= 65).mean() * 100),
-            "source":            self.data_source,
+            "total_days":           len(df),
+            "date_range_start":     str(min_date),
+            "date_range_end":       str(max_date),
+            "avg_by_dow":           df.groupby("dow")["busyness_index"].mean().to_dict(),
+            "avg_overall":          float(df["busyness_index"].mean()),
+            "busiest_dow":          int(df.groupby("dow")["busyness_index"].mean().idxmax()),
+            "quietest_dow":         int(df.groupby("dow")["busyness_index"].mean().idxmin()),
+            "pct_above_65":         float((df["busyness_index"] >= 65).mean() * 100),
+            "source":               self.data_source,
+            # Per-source diagnostics
+            "infrared_days":        len(infrared_raw),
+            "infrared_start":       infrared_start,
+            "infrared_end":         infrared_end,
+            "infrared_avg":         float(infrared_raw["total_count"].mean()) if not infrared_raw.empty and "total_count" in infrared_raw.columns else 0,
+            "people_days":          len(people_raw),
+            "people_start":         people_start,
+            "people_end":           people_end,
+            "parking_days_raw":     len(parking_raw),
+            "parking_days_used":    len(parking_filtered),
+            "parking_days_excluded":len(parking_raw) - len(parking_filtered),
+            "parking_start":        parking_start,
+            "parking_end":          parking_end,
+            "parking_avg":          float(parking_raw["parking_count"].mean()) if not parking_raw.empty and "parking_count" in parking_raw.columns else 0,
+            "weather_days":         len(weather_df),
+            "weather_start":        weather_start,
+            "weather_end":          weather_end,
         }
         self.is_trained = True
 
@@ -832,6 +884,159 @@ for week in weeks:
                         <div style="font-size:0.75rem;font-weight:{'700' if is_sel else '400'};color:#1a1a2e">{d.day}</div>
                         <div style="font-size:1.0rem;font-weight:700;color:{c}">{s:.0f}</div>
                     </div>""", unsafe_allow_html=True)
+
+st.divider()
+
+# ── Diagnostic Section ────────────────────────────────────────────────────
+st.markdown("### 🔬 Model Training Diagnostics")
+st.caption("A breakdown of the data sources used to train the forecast model.")
+
+ds = model.data_stats
+dow_names_diag = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+
+if ds.get("source") == "synthetic":
+    st.warning("Model is running on synthetic training data — live API was unavailable at startup.", icon="⚠️")
+else:
+    # ── Overview metrics row ──────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("📅 Training Days", f"{ds.get('total_days', 0):,}")
+        st.caption(f"{ds.get('date_range_start','')[:10]}  →  {ds.get('date_range_end','')[:10]}")
+    with c2:
+        st.metric("📊 Model Accuracy (R²)", f"{(model.train_r2 or 0)*100:.1f}%")
+        st.caption("Cross-validated on held-out data")
+    with c3:
+        busiest = ds.get("busiest_dow", 5)
+        quietest = ds.get("quietest_dow", 1)
+        st.metric("🔴 Busiest Day", dow_names_diag[busiest])
+        st.caption(f"Avg score: {ds.get('avg_by_dow',{}).get(busiest,0):.0f}/100")
+    with c4:
+        st.metric("🟢 Quietest Day", dow_names_diag[quietest])
+        st.caption(f"Avg score: {ds.get('avg_by_dow',{}).get(quietest,0):.0f}/100")
+
+    st.markdown("---")
+
+    # ── Per-source breakdown ──────────────────────────────────────────────
+    st.markdown("#### 📡 Data Sources Used in Training")
+    src_c1, src_c2, src_c3, src_c4 = st.columns(4)
+
+    with src_c1:
+        st.markdown("**🚶 Infrared Counters**")
+        days = ds.get("infrared_days", 0)
+        st.metric("Observation Records", f"{days:,}")
+        if days > 0:
+            st.caption(f"📅 {ds.get('infrared_start','')[:10]} → {ds.get('infrared_end','')[:10]}")
+            avg = ds.get("infrared_avg", 0)
+            st.caption(f"Avg daily count: {avg:,.0f} people")
+            st.success("✅ Active" if days > 0 else "")
+        else:
+            st.warning("No data returned")
+        st.caption("Source: Ballarat Open Data infrared-counters dataset. Sensors at Lake Wendouree, Loreto Point and CBD locations.")
+
+    with src_c2:
+        st.markdown("**👥 People Counts**")
+        days = ds.get("people_days", 0)
+        st.metric("Observation Records", f"{days:,}")
+        if days > 0:
+            st.caption(f"📅 {ds.get('people_start','')[:10]} → {ds.get('people_end','')[:10]}")
+            st.success("✅ Active")
+        else:
+            st.warning("No data returned")
+        st.caption("Source: Ballarat Open Data people-counts dataset. 15-minute interval counts aggregated to daily totals.")
+
+    with src_c3:
+        st.markdown("**🅿️ Parking Transactions**")
+        raw  = ds.get("parking_days_raw", 0)
+        used = ds.get("parking_days_used", 0)
+        excl = ds.get("parking_days_excluded", 0)
+        st.metric("Records Used in Training", f"{used:,}")
+        if raw > 0:
+            st.caption(f"📅 {ds.get('parking_start','')[:10]} → {ds.get('parking_end','')[:10]}")
+            st.caption(f"Raw records: {raw:,}")
+            st.caption(f"Excluded (free parking days): {excl:,}")
+            avg_p = ds.get("parking_avg", 0)
+            st.caption(f"Avg daily transactions: {avg_p:,.0f}")
+            st.success("✅ Active")
+        else:
+            st.warning("No data returned")
+        st.caption("Source: Ballarat Open Data parking-transactions dataset. Sundays & public holidays excluded (free parking = zero transactions).")
+
+    with src_c4:
+        st.markdown("**🌦️ Weather (Open-Meteo)**")
+        days = ds.get("weather_days", 0)
+        st.metric("Days of Weather Data", f"{days:,}")
+        if days > 0:
+            st.caption(f"📅 {ds.get('weather_start','')[:10]} → {ds.get('weather_end','')[:10]}")
+            st.success("✅ Active")
+        else:
+            st.warning("No weather data")
+        st.caption("Source: Open-Meteo archive API. Variables: max temp, min temp, rainfall, wind speed, weather code, sunshine hours.")
+
+    st.markdown("---")
+
+    # ── Day-of-week average busyness bar chart ────────────────────────────
+    st.markdown("#### 📈 Historical Average Busyness by Day of Week")
+    st.caption("Observed average busyness index (0–100) per day of week across all training data.")
+
+    avg_by_dow = ds.get("avg_by_dow", {})
+    if avg_by_dow:
+        dow_df = pd.DataFrame([
+            {"Day": dow_names_diag[int(k)], "Avg Busyness": round(v, 1), "dow_order": int(k)}
+            for k, v in avg_by_dow.items()
+        ]).sort_values("dow_order")
+
+        colours = []
+        for _, r in dow_df.iterrows():
+            if r["Avg Busyness"] >= 65:   colours.append("#e67e22")
+            elif r["Avg Busyness"] >= 45: colours.append("#f1c40f")
+            else:                          colours.append("#2ecc71")
+
+        fig_dow = go.Figure(go.Bar(
+            x=dow_df["Day"],
+            y=dow_df["Avg Busyness"],
+            marker_color=colours,
+            text=[f"{v:.0f}" for v in dow_df["Avg Busyness"]],
+            textposition="outside",
+            textfont=dict(size=12),
+            hovertemplate="<b>%{x}</b><br>Avg: %{y:.1f}/100<extra></extra>",
+        ))
+        fig_dow.update_layout(
+            height=300,
+            yaxis=dict(range=[0, 110], title="Avg Busyness Score", showgrid=True, gridcolor="#333"),
+            xaxis=dict(title=""),
+            margin=dict(l=0, r=0, t=20, b=0),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            bargap=0.3,
+        )
+        fig_dow.add_hline(y=ds.get("avg_overall", 50), line_dash="dot", line_color="#3a86ff",
+                          line_width=2, annotation_text=f"Overall avg: {ds.get('avg_overall',50):.0f}",
+                          annotation_position="right", annotation_font_color="#3a86ff", annotation_font_size=11)
+        st.plotly_chart(fig_dow, use_container_width=True)
+
+    # ── How model uses the data — explainer ───────────────────────────────
+    with st.expander("ℹ️ How does the model use this data?"):
+        st.markdown(f"""
+**The model does not simply average each day of the week.** Instead it uses XGBoost — a gradient
+boosted decision tree algorithm — that learns complex interactions between all signals simultaneously.
+
+**Training process:**
+1. Each historical day becomes a row of ~27 features (day of week, month, weather, events, holidays, etc.)
+2. The busyness index for that day (derived from the sensor data above) is the target value
+3. XGBoost builds {400} decision trees, each correcting the errors of the previous
+4. Trees vote together to produce a final prediction score
+
+**Why `is_free_parking_day` dominates the feature importance chart:**
+The parking dataset has zero transactions on Sundays and public holidays. This creates a very strong
+structural signal — the model quickly learns that days with no parking data behave differently from
+weekdays. This is a data artifact rather than a meaningful signal, which is why we added the
+`is_free_parking_day` feature to explicitly flag it.
+
+**Data quality note:**
+With {ds.get('total_days', 0):,} training days and a cross-validated R² of {(model.train_r2 or 0)*100:.1f}%,
+the model explains roughly {(model.train_r2 or 0)*100:.0f}% of the variance in observed busyness.
+The remaining variance is due to factors not captured in the data (one-off events, road closures, etc.).
+        """)
 
 st.divider()
 st.markdown("""
