@@ -1196,6 +1196,173 @@ The remaining variance is due to factors not captured in the data (one-off event
         """)
 
 st.divider()
+
+# ── About Section ─────────────────────────────────────────────────────────
+st.markdown("### ℹ️ About This Tool")
+st.markdown("""
+The Ballarat Busyness Forecaster is a community research tool that predicts how busy Ballarat town
+centre is likely to be on any given day. Here's a plain-language explanation of how it works.
+""")
+
+with st.expander("📊 Where does the data come from?", expanded=False):
+    st.markdown("""
+The tool draws on four separate data sources, all of which are either publicly available or free to access.
+
+**Ballarat City Council — Infrared Pedestrian Counters**
+The council has installed infrared sensors at key locations around Ballarat, including Lake Wendouree,
+Loreto Point, and various CBD streets. These sensors count the number of people and cyclists passing
+by throughout the day, and the data is published daily on the Ballarat Open Data portal. This is our
+primary real-world measure of how many people are actually out and about in Ballarat.
+
+**Ballarat City Council — Parking Transactions**
+Every time someone pays at a CBD parking meter, a transaction is recorded. The council publishes
+these monthly. A high number of parking transactions on a weekday is a strong signal that the CBD
+is busy with shoppers, workers and visitors.
+
+One important note: Ballarat offers **free parking on Sundays and public holidays**. On those days,
+parking transactions drop to zero not because the town is quiet, but because nobody is paying meters.
+The tool automatically detects and corrects for this so it doesn't incorrectly rate Sundays as quiet.
+
+**Open-Meteo — Weather Forecasts and Historical Weather**
+Open-Meteo is a free, open-source weather service. The tool fetches both historical weather (for
+training the model) and forecast weather (for future predictions). Weather variables used include
+maximum temperature, minimum temperature, total rainfall, wind speed, weather condition code
+(sunny / cloudy / rainy / etc.) and sunshine duration.
+
+**Victorian Government — Public Holidays**
+Victorian public holidays are sourced automatically from the `holidays` Python library, which is
+kept up to date with official government announcements. This covers days like Easter, ANZAC Day,
+the AFL Grand Final Friday, Melbourne Cup and Christmas.
+    """)
+
+with st.expander("🧮 How is the busyness score calculated?", expanded=False):
+    st.markdown("""
+The busyness score is a number between 0 and 100, where 0 means the quietest day ever recorded
+and 100 means the busiest. Here's how it's built, step by step.
+
+**Step 1 — Collecting the raw data**
+The tool pulls pedestrian counts and parking transaction records from the Ballarat Open Data API.
+These raw numbers are combined and scaled so that the single busiest day across the entire dataset
+scores 100 and the quietest scores 0. Every other day falls somewhere in between. This gives us a
+consistent "busyness index" for every historical day we have data for.
+
+**Step 2 — Building a picture of each day**
+For every day in the historical dataset, the tool builds a list of around 30 characteristics —
+things like:
+- What day of the week was it?
+- What month was it?
+- Was it a public holiday or the day before one?
+- Was it during school holidays?
+- Was there a local event on (like the Begonia Festival or White Night)?
+- What was the weather like — temperature, rainfall, sunshine?
+- What was the busyness score exactly one year ago for the same week?
+- What's the average busyness for this month and this day of week historically?
+- What have the last four same-weekdays looked like?
+
+**Step 3 — Training the model**
+All of this historical data is fed into a machine learning algorithm called **XGBoost** (Extreme
+Gradient Boosting). XGBoost works by building hundreds of decision trees — think of each tree as
+a long chain of if/then questions, like *"if it's a Saturday, AND it's not raining, AND there's a
+local event on, then busyness tends to be high."* Each tree learns from the mistakes of the
+previous one, gradually getting better at predicting the actual observed busyness score.
+
+After training, the model has learned the complex relationship between all these signals and the
+actual observed busyness data from Ballarat's own sensors.
+
+**Step 4 — Making a prediction**
+When you select a date, the tool builds the same list of ~30 characteristics for that day —
+using weather forecasts for future dates, or historical weather for past dates. It then runs
+those characteristics through the trained model, which outputs a predicted busyness score
+between 0 and 100.
+
+**Step 5 — The rating labels**
+The score is then translated into a plain-language rating:
+
+| Score | Rating |
+|-------|--------|
+| 80 – 100 | 🔴 Very Busy |
+| 65 – 79 | 🟠 Busy |
+| 45 – 64 | 🟡 Moderate |
+| 25 – 44 | 🟢 Quiet |
+| 0 – 24 | 🟢 Very Quiet |
+    """)
+
+with st.expander("🔁 What are the historical comparison features?", expanded=False):
+    st.markdown("""
+One of the most powerful improvements in this tool is the use of **lag features** — direct lookups
+into the historical data to find what actually happened on comparable days in the past. There are
+three of these:
+
+**Same Week Last Year**
+The tool looks back exactly 52 weeks (364 days) to find the same day of the week in the same
+week of the year. For example, if you're looking at Thursday 20 March 2026, it will look for
+Thursday 20 March 2025 (or the closest equivalent Thursday if that exact date has no data).
+This is the single most powerful historical signal because it captures seasonality, local rhythms
+and annual patterns all at once.
+
+**Average for This Month and Day of Week**
+The tool calculates the average busyness across every historical observation that shares both
+the same month and the same day of week. For example, it might look at all March Thursdays
+across the dataset and report that they average a score of 58. This smooths out any unusual
+one-off days and gives a reliable baseline for "what does a Thursday in March typically look like."
+
+**Rolling 4-Week Same-Day Average**
+The tool looks at the last four occurrences of the same day of week (e.g. the last four Thursdays)
+and averages their busyness scores. This captures any recent shifts in activity — for example, if
+Ballarat has been unusually quiet over the past month for whatever reason, this feature will reflect
+that and nudge the prediction accordingly.
+
+All three of these historical signals are fed directly into the XGBoost model as additional input
+features, so they influence the final score rather than just appearing as commentary.
+    """)
+
+with st.expander("⚠️ What are the limitations?", expanded=False):
+    st.markdown("""
+This tool is a research and community project. It's designed to give a useful general indication
+of busyness, but there are some important limitations to be aware of.
+
+**It can't predict one-off events**
+If a major unannounced event, road closure, festival or emergency happens in Ballarat, the model
+won't know about it unless it's in the curated events calendar. The events calendar covers known
+recurring annual events but can't anticipate surprises.
+
+**Weather forecasts are only available ~16 days ahead**
+For dates more than 16 days in the future, the tool uses seasonal weather averages rather than
+actual forecast data. Predictions for distant future dates are therefore less precise.
+
+**The model is only as good as the data**
+The Ballarat Open Data API is the foundation of everything. If the council's sensors go offline,
+if data isn't published on time, or if the API is unavailable, the tool automatically falls back
+to synthetic training data. Predictions still follow realistic patterns, but they won't be
+calibrated to actual observed counts.
+
+**Correlation, not causation**
+The model learns statistical patterns — it doesn't "understand" why Ballarat is busy. It knows
+that Saturdays in March tend to be busy because that's what the data shows, but it can't reason
+about novel situations the way a human can.
+
+**The score is relative, not absolute**
+A score of 70 means "busier than most days" relative to Ballarat's own historical range. It
+doesn't mean 70% of maximum possible crowd capacity or any absolute measure of people numbers.
+    """)
+
+with st.expander("🏙️ About Ballarat Open Data", expanded=False):
+    st.markdown("""
+[Ballarat Open Data](https://data.ballarat.vic.gov.au) is a public data portal run by the
+City of Ballarat. It publishes a range of datasets about the city including pedestrian counts,
+parking data, traffic counts, infrastructure locations and more — all freely accessible via
+a REST API with no registration required.
+
+This tool uses the following datasets:
+- **infrared-counters** — pedestrian and cyclist counts from Eco Counter infrared sensors
+- **people-counts** — additional people count observations
+- **parking-transactions** — CBD parking meter transaction records
+
+The City of Ballarat acknowledges the Wadawurrung People as the Traditional Owners of this
+land and pays respect to their Elders past, present and emerging.
+    """)
+
+st.divider()
 st.markdown("""
 <div style="text-align:center;color:#aaa;font-size:0.8rem;padding:1rem 0">
     Ballarat Busyness Forecaster &nbsp;|&nbsp;
