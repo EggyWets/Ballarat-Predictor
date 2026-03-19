@@ -15,7 +15,37 @@ import plotly.express as px
 from datetime import date, timedelta
 import sys
 import os
-from data_fetcher import describe_weather_code
+
+# ── Inline weather code lookup (avoids circular import issues) ────────────
+WMO_CODES = {
+    0:  ("Clear sky",           "☀️",  1.00),
+    1:  ("Mainly clear",        "🌤️", 0.95),
+    2:  ("Partly cloudy",       "⛅",  0.80),
+    3:  ("Overcast",            "☁️",  0.65),
+    45: ("Foggy",               "🌫️", 0.55),
+    48: ("Icy fog",             "🌫️", 0.45),
+    51: ("Light drizzle",       "🌦️", 0.55),
+    53: ("Moderate drizzle",    "🌧️", 0.40),
+    55: ("Dense drizzle",       "🌧️", 0.30),
+    61: ("Slight rain",         "🌧️", 0.50),
+    63: ("Moderate rain",       "🌧️", 0.30),
+    65: ("Heavy rain",          "🌧️", 0.15),
+    71: ("Slight snow",         "🌨️", 0.35),
+    73: ("Moderate snow",       "🌨️", 0.25),
+    75: ("Heavy snow",          "❄️",  0.10),
+    80: ("Rain showers",        "🌦️", 0.45),
+    81: ("Moderate showers",    "🌧️", 0.30),
+    82: ("Violent showers",     "⛈️", 0.10),
+    95: ("Thunderstorm",        "⛈️", 0.10),
+    99: ("Thunderstorm + hail", "⛈️", 0.05),
+}
+
+def describe_weather_code(code):
+    try:
+        code = int(code)
+    except (TypeError, ValueError):
+        return ("Unknown conditions", "❓", 0.70)
+    return WMO_CODES.get(code, ("Unknown conditions", "❓", 0.70))
 
 # ── Page config (must be first Streamlit call) ────────────────────────────
 st.set_page_config(
