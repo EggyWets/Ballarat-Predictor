@@ -87,6 +87,10 @@ FEATURE_COLS = [
     "weather_code", "sunshine_hours",
     "is_rainy", "is_hot", "is_cold", "is_pleasant",
     "is_free_parking_day",
+    # ── Lag features: historical same-day lookups ─────────────────────────
+    "lag_same_week_last_year",   # observed score ~52 weeks ago, same day-of-week
+    "lag_avg_month_dow",         # avg score for this month + day-of-week combo
+    "lag_rolling_4wk_dow",       # avg of last 4 occurrences of this day-of-week
 ]
 
 
@@ -285,7 +289,85 @@ def get_weather_for_date(d):
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 4 — FEATURE ENGINEERING
 # ═════════════════════════════════════════════════════════════════════════════
-def build_features(d, weather=None):
+
+def compute_lag_lookup(traffic_df):
+    """
+    Pre-compute a lookup dict from the historical traffic DataFrame so we can
+    quickly retrieve lag features for any date without re-scanning the full table.
+
+    Returns a dict with:
+      - "by_date":     {date: busyness_index}  — raw daily lookup
+      - "month_dow":   {(month, dow): mean}    — avg for each month+day-of-week combo
+      - "by_iso_week_dow": {(iso_week, dow, year): busyness_index}
+    """
+    if traffic_df is None or traffic_df.empty:
+        return {}
+
+    df = traffic_df.copy()
+    df["date"] = pd.to_datetime(df["date"].astype(str)).dt.date
+    df = df.dropna(subset=["busyness_index"])
+
+    by_date = dict(zip(df["date"], df["busyness_index"]))
+
+    df["month"] = df["date"].apply(lambda d: d.month)
+    df["dow"]   = df["date"].apply(lambda d: d.weekday())
+    month_dow   = df.groupby(["month","dow"])["busyness_index"].mean().to_dict()
+
+    return {
+        "by_date":   by_date,
+        "month_dow": month_dow,
+        "df":        df,   # kept for rolling calc
+    }
+
+
+def get_lag_features(d, lag_lookup):
+    """
+    Compute the three lag features for date d using the pre-built lookup.
+    Returns dict with the three lag values (or neutral 50.0 if no data available).
+    """
+    NEUTRAL = 50.0
+
+    if not lag_lookup:
+        return {
+            "lag_same_week_last_year": NEUTRAL,
+            "lag_avg_month_dow":       NEUTRAL,
+            "lag_rolling_4wk_dow":     NEUTRAL,
+        }
+
+    by_date   = lag_lookup.get("by_date", {})
+    month_dow = lag_lookup.get("month_dow", {})
+    df_hist   = lag_lookup.get("df", pd.DataFrame())
+
+    # ── Feature 1: same ISO week last year, same day-of-week ─────────────
+    # Try exact 364-day lookback (52 weeks), then ±7 days if not found
+    lag1 = NEUTRAL
+    for offset in [364, 371, 357, 378, 350]:
+        candidate = d - timedelta(days=offset)
+        if candidate in by_date:
+            lag1 = by_date[candidate]
+            break
+
+    # ── Feature 2: avg of this month + day-of-week across all history ────
+    key  = (d.month, d.weekday())
+    lag2 = month_dow.get(key, NEUTRAL)
+
+    # ── Feature 3: rolling avg of last 4 same-weekday occurrences ────────
+    lag3 = NEUTRAL
+    if not df_hist.empty:
+        same_dow = df_hist[df_hist["dow"] == d.weekday()].copy()
+        same_dow = same_dow[same_dow["date"] < d].sort_values("date", ascending=False)
+        recent4  = same_dow.head(4)
+        if len(recent4) >= 2:
+            lag3 = float(recent4["busyness_index"].mean())
+
+    return {
+        "lag_same_week_last_year": round(lag1, 2),
+        "lag_avg_month_dow":       round(lag2, 2),
+        "lag_rolling_4wk_dow":     round(lag3, 2),
+    }
+
+
+def build_features(d, weather=None, lag_lookup=None):
     if weather is None:
         weather = get_weather_for_date(d)
     is_ph, _ = is_public_holiday(d)
@@ -319,6 +401,8 @@ def build_features(d, weather=None):
         "is_pleasant":         int(15 <= float(weather.get("temperature_2m_max",15) or 15) <= 26
                                    and float(weather.get("precipitation_sum",0) or 0) < 1.0),
         "is_free_parking_day": int(d.weekday() == 6 or is_ph),
+        # ── Lag features ─────────────────────────────────────────────────
+        **get_lag_features(d, lag_lookup),
     }
 
 
@@ -348,7 +432,7 @@ def score_to_label(score):
     if score >= 25: return {"text":"Quiet",       "colour":"#2ecc71","emoji":"🟢","tier":2}
     return             {"text":"Very Quiet",   "colour":"#27ae60","emoji":"🟢","tier":1}
 
-def build_reasons(d, feats, weather, score, data_stats=None):
+def build_reasons(d, feats, weather, score, data_stats=None, lag_lookup=None):
     reasons   = []
     dow_names = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
     dow       = dow_names[d.weekday()]
@@ -403,6 +487,72 @@ def build_reasons(d, feats, weather, score, data_stats=None):
         if feats.get(key):
             reasons.append((icon, label, detail))
             break
+
+    # ── Lag feature observations ─────────────────────────────────────────
+    if lag_lookup and lag_lookup.get("by_date"):
+        lag_feats   = get_lag_features(d, lag_lookup)
+        dow_names_l = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+        dow_label   = dow_names_l[d.weekday()]
+        month_names_l = ["January","February","March","April","May","June",
+                         "July","August","September","October","November","December"]
+        month_label = month_names_l[d.month - 1]
+
+        # Feature 1 — same week last year
+        lag1 = lag_feats["lag_same_week_last_year"]
+        if lag1 != 50.0:
+            # Find which actual date was used
+            actual_lag_date = None
+            for offset in [364, 371, 357, 378, 350]:
+                candidate = d - timedelta(days=offset)
+                if candidate in lag_lookup.get("by_date", {}):
+                    actual_lag_date = candidate
+                    break
+            date_str = actual_lag_date.strftime("%-d %B %Y") if actual_lag_date else "~1 year ago"
+            lbl      = score_to_label(lag1)
+            diff     = lag1 - feats.get("lag_avg_month_dow", 50)
+            vs_str   = f"{abs(diff):.0f} points {'above' if diff > 0 else 'below'} the {month_label} {dow_label} average"
+            reasons.append((
+                "🔁", f"Same Week Last Year: {lbl['text']} ({lag1:.0f}/100)",
+                f"On {date_str} — the equivalent {dow_label} in the same week last year — "
+                f"the observed busyness score was {lag1:.0f}/100 ({lbl['text']}), "
+                f"which was {vs_str}. This is the single strongest historical comparison available."
+            ))
+        else:
+            reasons.append((
+                "🔁", "Same Week Last Year: No Data",
+                "No observed data found for the equivalent week last year. "
+                "The model is relying on seasonal patterns and other signals for this date."
+            ))
+
+        # Feature 2 — avg for this month + day of week
+        lag2    = lag_feats["lag_avg_month_dow"]
+        lbl2    = score_to_label(lag2)
+        by_date = lag_lookup.get("by_date", {})
+        # Count how many matching month+dow observations exist
+        n_obs = sum(1 for dt in by_date if dt.month == d.month and dt.weekday() == d.weekday())
+        reasons.append((
+            "📆", f"Historical {month_label} {dow_label}s: avg {lag2:.0f}/100",
+            f"Across all {month_label} {dow_label}s in the training dataset ({n_obs} observations), "
+            f"the average busyness score is {lag2:.0f}/100 ({lbl2['text']}). "
+            f"This reflects the typical pattern for this specific month and day-of-week combination."
+        ))
+
+        # Feature 3 — rolling 4-week same-day average
+        lag3 = lag_feats["lag_rolling_4wk_dow"]
+        lbl3 = score_to_label(lag3)
+        # Find what dates those 4 weeks were
+        df_hist = lag_lookup.get("df", pd.DataFrame())
+        if not df_hist.empty:
+            recent = df_hist[df_hist["dow"] == d.weekday()]
+            recent = recent[recent["date"] < d].sort_values("date", ascending=False).head(4)
+            if len(recent) >= 2:
+                date_range_str = f"{recent.iloc[-1]['date'].strftime('%-d %b')} – {recent.iloc[0]['date'].strftime('%-d %b %Y')}"
+                reasons.append((
+                    "📉", f"Recent {dow_label} Trend: avg {lag3:.0f}/100",
+                    f"The last {len(recent)} {dow_label}s ({date_range_str}) averaged a busyness "
+                    f"score of {lag3:.0f}/100 ({lbl3['text']}). "
+                    f"This rolling trend captures any recent shifts in activity patterns."
+                ))
 
     # ── Historical data observations ──────────────────────────────────────
     if data_stats and data_stats.get("source") == "live":
@@ -465,6 +615,7 @@ class BusynessModel:
         self.train_r2 = None
         self.data_source = "unknown"
         self.data_stats = {}   # stores observed averages for reason callouts
+        self.lag_lookup = {}   # pre-computed historical lag lookup table
 
     def train(self, use_live_data=True):
         from xgboost import XGBRegressor
@@ -496,13 +647,16 @@ class BusynessModel:
 
         weather_df = fetch_weather(min_date, max_date)
 
+        # Build lag lookup once before the loop (not on every row)
+        train_lag_lookup = compute_lag_lookup(traffic)
+
         rows = []
         for _, row in traffic.iterrows():
             d = row["date"]
             if isinstance(d, str): d = date.fromisoformat(d)
             w_row = weather_df[weather_df["date"] == d]
             w = w_row.iloc[0].to_dict() if not w_row.empty else {}
-            feats = build_features(d, w)
+            feats = build_features(d, w, lag_lookup=train_lag_lookup)
             feats["busyness_index"] = row["busyness_index"]
             feats["date"] = d
             rows.append(feats)
@@ -520,6 +674,9 @@ class BusynessModel:
         cv = cross_val_score(self.model, X, y, cv=min(5, len(X)//20 or 2), scoring="r2")
         self.train_r2 = float(np.mean(cv))
         self.feature_importances = dict(sorted(zip(FEATURE_COLS, self.model.feature_importances_), key=lambda x: -x[1]))
+
+        # Store lag lookup for use at prediction time
+        self.lag_lookup = compute_lag_lookup(traffic)
 
         # ── Per-source day counts for diagnostics ─────────────────────────
         def _date_range(df_src):
@@ -582,7 +739,7 @@ class BusynessModel:
             raise RuntimeError("Model not trained.")
         if weather is None:
             weather = get_weather_for_date(d)
-        feats = build_features(d, weather)
+        feats = build_features(d, weather, lag_lookup=self.lag_lookup)
         X     = pd.DataFrame([feats])[FEATURE_COLS].astype(float)
         score = float(np.clip(self.model.predict(X)[0], 0, 100))
         return {
@@ -590,7 +747,7 @@ class BusynessModel:
             "label": score_to_label(score),
             "feats": feats, "weather": weather,
             "events": get_events_for_date(d),
-            "reasons": build_reasons(d, feats, weather, score, self.data_stats),
+            "reasons": build_reasons(d, feats, weather, score, self.data_stats, self.lag_lookup),
         }
 
 
